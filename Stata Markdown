@@ -1,0 +1,323 @@
+%Will informativeness make up for the downsides of CEO overconfidence? Evidence from boardroom network centrality
+%Jun Xu
+% `s c(current_date)`
+
+# 1. Introduction
+
+In this project, I explore whether a firm’s information environment, which is proxied by boardroom network centrality, will modify the downsides of the consequence of overconfident CEOs.
+
+# 2. Data source
+
+The information about CEOs comes from Execucomp database. I download CEOs’ basic information, like name, gender, age, annual compensation, etc. I download the directors’ information from Boardex database, which contains the basic information for each director in each company. The companies’ financial information and stock price information are obtained from Compustat database and CRSP database respectively. All the data process and analysis are conducted in STATA.
+
+# 3. Directory organization
+
+I have set the MACRO for the whole codes. If someone wants to run the code in his own computer, he only needs to change the path to his own computer. I created three folders. The first one is for the code, the second one is for the raw data, and the last one is for the intermediate data. For example, I downloaded raw data (public data) and kept them in the “data” folder. When I need them, I directly get them from the “data” folder. After all kinds of processing, I store the intermediate data into the “temp” fold. I also name the intermediate data sets based on their years consistently. Therefore, I can distinguish different data source clearly.
+
+```s/
+quietly{
+clear
+clear matrix
+set memory 2000m
+global path C:\Users\Polyu\Desktop\Projects\CEO_overconfidence_and_board_centrality_project
+}
+```
+
+# 4. Construct the CEO and executives sample
+
+First, I clean the CEO data to make sure that each company-year has one, and only one CEO. Some company-years have no CEO. I identified the highest paid executive as the CEO. Some company-years have more than one CEO. I regarded the highest paid CEO as the true CEO.
+
+###### 4.1 Prepare cik and gvkey identifier
+
+```s/
+quietly{
+use $path\data\board_ex\cikgvkey, replace
+rename fyear year
+keep cik cusip year
+replace cusip=substr(cusip, 1,8)
+drop if cik=="" | cusip==""
+duplicates drop cusip year, force //pure duplicates//
+save $path\temp\cikgvkey2, replace
+}
+```
+
+###### 4.2 Clear the CEO data
+
+```s/
+quietly{
+use $path\data\execu_comp\executive, clear
+rename YEAR year
+rename CUSIP cusip
+merge m:1 cusip year using $path\temp\cikgvkey2, keepusing(cik)
+drop if _merge==2
+sort cusip year
+by cusip: replace cik=cik[_n-1] if cik=="" & _merge==1
+gsort cusip -year
+by cusip: replace cik=cik[_n-1] if cik=="" & _merge==1
+drop if cik==""
+drop _merge
+rename cusip CUSIP
+drop if year<2008 | year>2018
+replace CEOANN="CEO" if CEOANN!=""
+format TITLEANN %20s
+format CONAME %20s
+foreach v of varlist SALARY BONUS OTHCOMP OTHANN RSTKGRNT OPTION_AWARDS LTIP{
+replace `v'=0 if `v'==.
+}
+replace TDC1=SALARY+BONUS+OTHCOMP+OTHANN+RSTKGRNT+OPTION_AWARDS+LTIP if TDC1==.
+gen CEO=CEOANN
+gsort CUSIP year -CEO
+by CUSIP year: replace CEO=CEO[_n-1] if _n>1
+gsort CUSIP year -TDC1
+by CUSIP year: gen id=_n if CEO==""
+replace CEOANN="CEO" if id==1 
+drop CEO id
+gsort CUSIP year CEOANN -TDC1
+by CUSIP year CEOANN: gen id=_n if CEOANN=="CEO"
+replace CEOANN="" if id!=1
+drop id
+keep if CEOANN=="CEO"
+save $path\temp\CEOsample, replace
+}
+```
+
+# 5. Calculate the network centrality
+
+I create boardroom network centrality measures. Two companies are linked if they share at least one board member. Two companies are not linked if they do not share a board member.
+
+```s/
+quietly{     
+use $path\data\board_ex\organizationsummary.dta, clear
+//change annual report date to fiscal year//
+gen year=year(annualreportdate) if month(annualreportdate)>=6
+replace year=year(annualreportdate)-1 if year==.
+duplicates drop boardid year directorid, force
+rename cikcode cik
+keep boardid cik directorid year
+drop if year<2008 | year>2018
+save $path\temp\board_director, replace
+
+forvalues i=2008/2018{
+use $path\temp\board_director, clear
+keep if year==`i'
+drop year cik
+sort boardid directorid
+save $path\temp\temp, replace
+rename boardid lboardid
+joinby directorid using $path\temp\temp
+drop directorid
+sort lboardid boardid
+bysort lboardid boardid: gen id=_n
+bysort lboardid boardid: egen value=max(id)
+drop id
+replace value=1 if lboardid==boardid
+duplicates drop lboardid boardid, force
+by lboardid: egen Degree=sum(value)
+drop boardid value
+duplicates drop lboardid, force
+rename lboardid boardid
+gen year=`i'
+save $path\temp\boarddegree`i', replace
+}
+use $path\temp\boarddegree2008, clear
+forvalues i=2009/2018{
+append using $path\temp\boarddegree`i'
+}
+save $path\temp\boarddegreeall, replace
+}
+quietly{
+use $path\temp\board_director, clear
+merge m:1 boardid year using $path\temp\boarddegreeall
+drop _merge
+drop if cik==""
+drop directorid boardid
+//change cik format and delete replications //
+gen cik2=substr("0000000000", 1, 10-length(cik))+cik
+drop cik
+rename cik2 cik
+duplicates drop cik year, force
+save $path\temp\boarddegreeall2, replace
+}
+```
+
+# 6. Prepare dependent variables
+
+    1. EBIT/assets:The firm’s EBIT (Compustat: ebit) scaled by its book assets (Compustat: at).
+    2. CAPEX/assets:The firm’s capital expenditures (Compustat: capx) scaled by its assets (Compustat: at).
+	
+```s/
+quietly{
+use $path\data\CCMAnn, clear
+drop if cusip==""
+duplicates drop cusip fyear, force
+gen CUSIP=substr(cusip,1,8)
+rename fyear year
+egen id=group(CUSIP)
+tsset id year
+gen CAPEX=capx/l.at
+gen fCAPEX=f.CAPEX
+gen ROA=ib/at
+gen fROA=f.ROA
+gen ChangeROA=ROA-l.ROA
+gen fChangeROA=f.ChangeROA
+gen Tobinq=(at-ceq+csho*prcc_f)/at
+gen fTobinq=f.Tobinq
+keep CUSIP year f* sic
+order f*
+save $path\temp\performance, replace
+}
+```
+# 7. Prepare control variables
+
+###### 7.1 CEO control variables
+
+    1. In(CEOtenure)：The natural log of one plus the number of years that the CEO has been the CEO of the company.
+    2. ln (CEO age)：The natural log of the CEO’s age.
+    3. CEO bonus/salary：The ratio of the CEO’s bonus payment as ratio of his or her fixed salary.
+
+```s/
+quietly{
+use $path\temp\CEOsample, clear
+gen CEOtenure=year-year(BECAMECEO)
+sort CUSIP EXECID year
+by CUSIP EXECID: gen id=_n
+replace CEOtenure=id-1 if CEOtenure==. | CEOtenure<0
+gen lnCEOtenure=ln(1+CEOtenure)
+gen lnCEOage=ln(AGE)
+gen bonus_salary=BONUS/SALARY
+//construct CEO power measure//
+gen CEOpower=0
+replace CEOpower=1 if strmatch(TITLEANN, "*chairman*") | strmatch(TITLEANN, "*chmn*")
+replace CEOpower=2 if (strmatch(TITLEANN, "*chairman*") | strmatch(TITLEANN, "*chmn*")) & (strmatch(TITLEANN, "*president*") |strmatch(TITLEANN, "*pres*"))
+keep CUSIP year lnCEOtenure lnCEOage bonus_salary CEOpower
+save $path\temp\CEOcontrols, replace
+}
+```
+
+###### 7.2 Corporate control variables
+
+    1. MTB:The firm’s market-to-book ratio, being its market value at the end of the fiscal year (CRSP/Compustat: prcc_f × csho) divided by its book assets (Compustat: at).
+    2. Cash/assets:The firm’s cash holdings (Compustat: ch) divided by its book assets (Compustat: at).
+    3. R&D/sales:The firm’s R&D expenditure (Compustat: xrd) divided by its sales (Compustat: sale).
+    4. CAPEX/assets:The firm’s capital expenditures (Compustat: capx) scaled by its assets (Compustat: at).
+    5. CAPEX/sales:The firm’s capital expenditure (Compustat: capx) divided by its sales (Compustat: sale).
+    6. Ln (assets):The natural log of the firm’s book assets (Compustat: at).
+    7. Debt/assets:The firm’s long-term debt (Compustat: dltt) scaled by its assets (Compustat: at).
+    8. Intangibles/assets:The firm’s intangible assets (Compustat: intan) scaled by its total book assets (Compustat: at).
+
+```s/
+quietly{
+use $path\data\CCMAnn, clear
+drop if cusip==""
+duplicates drop cusip fyear, force
+gen CUSIP=substr(cusip,1,8)
+rename fyear year
+egen id=group(cusip)
+tsset id year
+gen Cash_Assets=ch/at
+gen Size=ln(csho*prcc_f)
+gen Tobinq=(at-ceq+csho*prcc_f)/at
+replace xrd=0 if xrd==.
+gen RandD_Sales=xrd/sale
+gen CAPEX_Sales=capx/sale
+gen CAPEX=capx/l.at
+gen LnAssets=ln(at)
+gen Debt_Assets=dltt/at
+gen Intangibles_Assets=intan/at
+gen ROA=ib/at
+gen ChangeROA=ROA-l.ROA
+gen CF=(ib+dpc)/at
+keep CUSIP year Cash_Assets RandD_Sales CAPEX CAPEX_Sales LnAssets Debt_Assets Intangibles_Assets Tobinq ROA CF ChangeROA Size
+save $path\temp\Firmcontrols, replace
+}
+```
+# 8. Merge data
+
+After creating all variables, I merge the data to conduct analysis.
+
+```s/
+quietly{
+use $path\temp\CEOsample, clear
+merge 1:1 CUSIP year using $path\temp\Overconfidence
+drop if _merge==2
+drop _merge
+merge 1:1 cik year using $path\temp\boarddegreeall2
+drop if _merge==2
+drop _merge
+merge 1:1 CUSIP year using $path\temp\CEOcontrols
+drop _merge
+merge 1:1 CUSIP year using $path\temp\Firmcontrols
+drop if _merge==2
+drop _merge
+merge 1:1 CUSIP year using $path\temp\performance
+drop if _merge==2
+drop _merge
+
+gen sic2= substr(sic,1,2)
+destring sic2, replace
+
+gen OCxDegree=Overconfidence*Degree
+gen OCxCF=Overconfidence*CF
+gen OCxCFxDegree=Overconfidence*CF*Degree
+
+gen ConfidencexDegree=Confidence*Degree
+gen ConfidencexCF=Confidence*CF
+gen ConfidencexCFxDegree=Confidence*CF*Degree
+
+gen DegreexCF=Degree*CF
+save $path\temp\reg, replace
+}
+```
+# 9. Data analysis
+
+###### 9.1 Deal with Outliers
+
+I will winsorize the code to deal with the outliers. Specifically, I change the top 1% data to the 1th percentile, and the bottom 1% data to the 100th percentile. Under this way, the influence of outliers is largely eliminated. Stata has the package to deal with outliers, and I can deal with each variable automatically.
+
+```s/
+quietly{
+use $path\temp\reg, clear
+order sic*
+foreach v of varlist Confidence-DegreexCF{
+winsor `v', gen(w`v') p(0.05)
+}
+}
+```
+
+###### 9.2 Descriptive statistics
+
+In order to check whether the variables I built contain errors, I created the following descriptive statistics and then compare them to the previous papers.
+
+```s/
+tabstat Confidence-fTobinq, ///
+stats(mean p25 p50 p75 min max) c(s) f(%6.2f)
+```
+
+###### 9.3 Graph
+
+The following graph describes the replation between Overconfidence and investment without controllong for other variables. It shows that Overconfident CEOs indeed overinvest.
+     
+    graph bar (mean) fCAPEX, over(Overconfidence) over(year) ytitle(Investment)
+	graph export fCAPEX.png, width(500) replace
+
+![Times series relation between overconfidence and investment](fCAPEX.png)
+
+###### 9.4 Check correlations
+
+When I run regression, there could be multicollinearity issues if two variables are highly correlated. Therefore, I check the correlation between each of the two variables first.
+
+```s/
+pwcorr Confidence Degree lnCEOtenure lnCEOage Tobinq fCAPEX  fROA
+```
+
+###### 9.5 Regression results
+
+The end product for statistical analysis is the company-year observations. The following is the regression analysis. There could be other uncontrolled time level or industry level variables that will also influence the dependent variables. Therefore, I control the time fixed effects and industry fixed effect. I also control for the group level correlations. STATA has convenient way to do so.
+
+```s/
+quietly xi: reg fCAPEX Overconfidence Degree CF DegreexCF OCxDegree OCxCF OCxCFxDegree CEOpower lnCEOtenure lnCEOage bonus_salary Size Debt_Assets Intangibles_Assets CAPEX RandD_Sales LnAssets   i.sic2 i.year , cluster(CUSIP)
+est store m1
+quietly xi: reg fChangeROA Overconfidence Degree OCxDegree  CEOpower lnCEOtenure lnCEOage bonus_salary Size Debt_Assets RandD_Sales Intangibles_Assets CAPEX ChangeROA LnAssets i.sic2 i.year, cluster(CUSIP)
+est store m2
+esttab m1 m2, varwidth(25) title (Regression results) scalar(r2 r2_a N F) compress star(* 0.1 ** 0.05 *** 0.01) b(%6.3f) t(%6.3f) drop(_Iyear_* _Isic2_* CEOpower lnCEOtenure lnCEOage bonus_salary Size Debt_Assets Intangibles_Assets CAPEX RandD_Sales LnAssets ChangeROA)
+```
